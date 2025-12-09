@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python
 """
 parse_utility_rates.py
 
@@ -102,11 +101,36 @@ def add_cents_per_kwh(df):
 def main():
     parser = argparse.ArgumentParser(description="Parse residential utility rates for any US ZIP code.")
 
-    parser.add_argument("--zip", required=True, help="Target ZIP code (5-digit)")
-    parser.add_argument("--urdb", default="usurdb.csv", help="Path to URDB CSV (default: usurdb.csv)")
-    parser.add_argument("--iou", default="iou_zipcodes_2024.csv", help="IOU ZIP mapping CSV")
-    parser.add_argument("--non-iou", dest="non_iou", default="non_iou_zipcodes_2024.csv", help="Non-IOU ZIP mapping CSV")
-    parser.add_argument("--out", default=None, help="Optional output CSV filename")
+    parser.add_argument(
+        "-z", "--zip",
+        required=True,
+        help="Target ZIP code (5-digit)"
+    )
+
+    parser.add_argument(
+        "-u", "--urdb",
+        default="usurdb.csv",
+        help="Path to URDB CSV (default: usurdb.csv)"
+    )
+
+    parser.add_argument(
+        "-i", "--iou",
+        default="iou_zipcodes_2024.csv",
+        help="IOU ZIP mapping CSV"
+    )
+
+    parser.add_argument(
+        "-n", "--non-iou",
+        dest="non_iou",
+        default="non_iou_zipcodes_2024.csv",
+        help="Non-IOU ZIP mapping CSV"
+    )
+
+    parser.add_argument(
+        "-o", "--out",
+        default=None,
+        help="Optional output CSV filename"
+    )
 
     args = parser.parse_args()
 
@@ -124,7 +148,6 @@ def main():
 
         cols_out = [
             "utility_name",
-            "ownership",
             "service_type",
             "cents_per_kwh",
             "fixedchargefirstmeter"
@@ -150,7 +173,6 @@ def main():
     except Exception as e:
         print(f"ERROR: {e}")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
