@@ -1,204 +1,156 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+parse_utility_rates.py
+
+General-purpose utility rate parser for arbitrary US ZIP codes using:
+- ZIP -> Utility mapping CSVs (with EIAID)
+- OpenEI Utility Rate Database (URDB) CSV
+"""
+
+import argparse
+import sys
+from pathlib import Path
 import pandas as pd
-import numpy as np
-import re
+from datetime import date
 
-# ============================================================
-# 1. Load datasets
-# ============================================================
+def require_file(path):
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Required file not found: {path}")
+    return path
 
-# Full URDB CSV (replace path if needed)
-df = pd.read_csv(r"usurdb.csv", low_memory=False)
+def load_zip_maps(iou_csv, non_iou_csv):
+    iou = pd.read_csv(iou_csv)
+    non_iou = pd.read_csv(non_iou_csv)
 
-# Combined IOU + non-IOU ZIP-Utility mappings
-zip_iou = pd.read_csv(r"iou_zipcodes_2024.csv")
-zip_non_iou = pd.read_csv(r"non_iou_zipcodes_2024.csv")
+    zipmap = pd.concat([iou, non_iou], ignore_index=True)
 
-# Combine ZIP maps
-zipmap = pd.concat([zip_iou, zip_non_iou], ignore_index=True)
+    if "eiaid" not in zipmap.columns:
+        raise ValueError("ZIP mapping files must contain 'eiaid' column")
 
-# ============================================================
-# 2. Get utilities for a ZIP
-# ============================================================
+    zipmap["zip"] = zipmap["zip"].astype("int64")
+    zipmap["eiaid"] = zipmap["eiaid"].astype("int64")
 
-target_zip = "01749"
-target_zip_int = int(target_zip)   # ZIPs stored without leading zeros
+    return zipmap
 
-zip_utilities = zipmap[zipmap['zip'] == target_zip_int]
-utilities = zip_utilities['utility_name'].unique().tolist()
+def load_urdb(urdb_csv):
+    df = pd.read_csv(urdb_csv, low_memory=False)
 
-# Print for debugging
-print("\nUtilities in ZIP", target_zip, ":")
-print(utilities)
+    if "eiaid" not in df.columns:
+        raise ValueError("URDB file must contain 'eiaid' column")
 
-# ============================================================
-# 3. Map ZIP-map utility names to URDB utility names
-# ============================================================
+    df["eiaid"] = df["eiaid"].astype("int64")
 
-utility_map = {
-    "Massachusetts Electric Co": "Massachusetts Electric Co",
-    "NSTAR Electric Company": "NSTAR Electric Company",
-    "Town of Hudson - (MA)": "Town of Hudson, Massachusetts (Utility Company)",
-    "Town of Littleton - (MA)": "Town of Littleton, Massachusetts (Utility Company)"
-}
+    return df
 
-mapped_utilities = [utility_map[u] for u in utilities]
+def filter_by_zip(zip_code, zipmap, urdb):
+    zip_code = int(zip_code)
 
-# ============================================================
-# 4. Filter URDB for these utilities (full set)
-# ============================================================
+    utilities = zipmap[zipmap["zip"] == zip_code]
 
-df_zip = df[df['utility'].isin(mapped_utilities)]
+    if utilities.empty:
+        raise ValueError(f"No utilities found for ZIP code {zip_code}")
 
-# Keep only residential sector
-df_zip_res = df_zip[df_zip['sector'] == "Residential"].copy()
+    zip_eiaids = utilities["eiaid"].unique()
+    df_zip = urdb[urdb["eiaid"].isin(zip_eiaids)]
 
-# ============================================================
-# 5. Filter to rates effective TODAY
-# ============================================================
+    df_zip = df_zip.merge(
+        utilities[["eiaid", "utility_name", "state", "ownership", "service_type"]],
+        on="eiaid",
+        how="left"
+    )
 
-df_zip_res['startdate'] = pd.to_datetime(df_zip_res['startdate'], errors='coerce')
-df_zip_res['enddate'] = pd.to_datetime(df_zip_res['enddate'], errors='coerce')
+    return df_zip
 
-# End date missing - assume still valid
-df_zip_res['enddate'] = df_zip_res['enddate'].fillna(pd.Timestamp("2100-01-01"))
+def filter_residential_active_today(df):
+    df2 = df.copy()
 
-today = pd.Timestamp.today().normalize()
+    # Residential only
+    df2 = df2[df2["sector"].str.contains("res", case=False, na=False)]
 
-df_active = df_zip_res[
-    (df_zip_res['startdate'] <= today) &
-    (df_zip_res['enddate'] >= today)
-].copy()
+    # Default tariffs only
+    df2 = df2[df2["is_default"] == True]
 
-print("\nActive residential rate plans:", df_active.shape[0])
+    # Parse dates safely
+    df2["startdate"] = pd.to_datetime(df2["startdate"], errors="coerce")
+    df2["enddate"] = pd.to_datetime(df2["enddate"], errors="coerce")
 
-# ============================================================
-# 6. Filter to single-family, non-low-income, non-special plans
-# ============================================================
+    today = pd.Timestamp(date.today())
 
-df_single = df_active.copy()
+    # Active today filter
+    df2 = df2[
+        ((df2["startdate"].isna()) | (df2["startdate"] <= today)) &
+        ((df2["enddate"].isna()) | (df2["enddate"] >= today))
+    ]
 
-exclude_multi = [
-    "Two", "2-", "2 ", "Two Residential",
-    "Three", "3-", "3 ", "Three Residential",
-    "Multi", "Multiple",
-    "Condominium"
-]
+    return df2
 
-exclude_special = [
-    "Water Heater",
-    "Heat Pump",
-    "Off Peak", "Off-peak",
-    "Storage", "Thermal",
-    "Electric Vehicle", "EV",
-    "Interruptible",
-    "Time of Use", "TOU",
-    "Seasonal"
-]
-
-exclude_low_income = [
-    "Low Income",
-    "Income Eligible",
-    "Discount",
-    "Lifeline",
-    "Assistance",
-    "Subsidized",
-    "R-2", "R2",
-    "A-2", "A2",
-]
-
-# Apply all exclusion filters
-for pat in exclude_multi + exclude_special + exclude_low_income:
-    df_single = df_single[~df_single['name'].str.contains(pat, case=False, na=False)]
-    df_single = df_single[~df_single['description'].str.contains(pat, case=False, na=False)]
-
-print("\nSingle-family, non-low-income active rate plans:", df_single.shape[0])
-
-def effective_cents_per_kwh_for_usage(row, monthly_kwh=720.0):
-    """
-    Compute effective cents/kWh for a given monthly_kwh usage,
-    using only energyratestructure/period0/tier* fields.
-    """
-    usage_remaining = monthly_kwh
-    cost = 0.0
-    prev_max = 0.0
-
-    for tier in range(0, 16):  # 0..15 tiers
-        rate_col = f"energyratestructure/period0/tier{tier}rate"
-        max_col  = f"energyratestructure/period0/tier{tier}max"
-
-        if rate_col not in row.index:
-            break
-
-        rate = row[rate_col]
-        if pd.isna(rate) or not isinstance(rate, (int, float)) or rate <= 0:
-            continue
-
-        tier_max = row[max_col] if max_col in row.index else np.nan
-
-        if pd.isna(tier_max) or tier_max <= 0:
-            # no upper bound => all remaining usage in this tier
-            tier_energy = usage_remaining
-        else:
-            available   = max(tier_max - prev_max, 0)
-            tier_energy = min(usage_remaining, available)
-
-        if tier_energy <= 0:
-            prev_max = tier_max if not pd.isna(tier_max) else prev_max
-            continue
-
-        cost += tier_energy * rate
-        usage_remaining -= tier_energy
-
-        prev_max = tier_max if not pd.isna(tier_max) and tier_max > 0 else prev_max
-
-        if usage_remaining <= 1e-6:
-            break
-
-    if monthly_kwh <= 0:
-        return None
-
-    effective_rate_dollars = cost / monthly_kwh
-    return effective_rate_dollars * 100.0  # cents/kWh
-
-# ============================================================
-# 7. Function to extract a representative cents/kWh
-# ============================================================
-
-def extract_cents_per_kwh(row):
-    """
-    Extracts all energy (not demand) tier rates from URDB columns like:
-    energyratestructure/periodX/tierYrate
-    and returns the lowest tier rate in cents/kWh.
-    """
-    rates = []
-
+def extract_flat_energy_rate(row):
     for col in row.index:
-        # Only energy (kWh) charges
-        if col.startswith("energyratestructure/") and col.endswith("rate"):
+        if col.startswith("energyratestructure") and col.endswith("rate"):
             val = row[col]
-            if pd.notna(val) and isinstance(val, (float, int)) and val > 0:
-                rates.append(val)
+            if pd.notna(val) and val > 0:
+                return float(val)
+    return None
 
-    if not rates:
-        return None
+def add_cents_per_kwh(df):
+    rates = df.apply(extract_flat_energy_rate, axis=1)
+    df["cents_per_kwh"] = (rates * 100).round(2)
+    return df
 
-    return min(rates) * 100   # Convert $/kWh -> cents/kWh
+def main():
+    parser = argparse.ArgumentParser(description="Parse residential utility rates for any US ZIP code.")
 
-# Compute cents/kWh column
-df_single["cents_per_kwh"] = df_single.apply(extract_cents_per_kwh, axis=1)
+    parser.add_argument("--zip", required=True, help="Target ZIP code (5-digit)")
+    parser.add_argument("--urdb", default="usurdb.csv", help="Path to URDB CSV (default: usurdb.csv)")
+    parser.add_argument("--iou", default="iou_zipcodes_2024.csv", help="IOU ZIP mapping CSV")
+    parser.add_argument("--non-iou", dest="non_iou", default="non_iou_zipcodes_2024.csv", help="Non-IOU ZIP mapping CSV")
+    parser.add_argument("--out", default=None, help="Optional output CSV filename")
 
-df_single["cents_per_kwh_1kWavg"] = df_single.apply(
-    effective_cents_per_kwh_for_usage, axis=1
-)
+    args = parser.parse_args()
 
-df_single[["utility", "name", "cents_per_kwh_1kWavg"]].sort_values(
-    "cents_per_kwh_1kWavg"
-)
+    try:
+        urdb_path = require_file(args.urdb)
+        iou_path = require_file(args.iou)
+        non_iou_path = require_file(args.non_iou)
 
-# ============================================================
-# 8. Show the final output
-# ============================================================
+        zipmap = load_zip_maps(iou_path, non_iou_path)
+        urdb = load_urdb(urdb_path)
 
-final_output = df_single[['utility', 'name', 'cents_per_kwh', 'cents_per_kwh_1kWavg']]
-print("\nFinal filtered rate plans:\n")
-print(final_output.sort_values(by='utility'))
+        df_zip = filter_by_zip(args.zip, zipmap, urdb)
+        df_res = filter_residential_active_today(df_zip)
+        df_res = add_cents_per_kwh(df_res)
+
+        cols_out = [
+            "utility_name",
+            "ownership",
+            "service_type",
+            "cents_per_kwh",
+            "fixedchargefirstmeter"
+        ]
+
+        cols_out = [c for c in cols_out if c in df_res.columns]
+
+        df_out = df_res[cols_out].dropna(subset=["cents_per_kwh"])
+
+        if args.out:
+            df_out.to_csv(args.out, index=False)
+            print(f"Wrote {len(df_out)} rows to {args.out}")
+        else:
+            # Pretty-print to terminal
+            pd.set_option("display.max_rows", None)
+            pd.set_option("display.max_columns", None)
+            pd.set_option("display.width", 160)
+            pd.set_option("display.colheader_justify", "left")
+
+            print("\nResidential Utility Rates (cents per kWh):\n")
+            print(df_out.to_string(index=False))
+
+    except Exception as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
