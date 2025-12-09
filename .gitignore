@@ -8,3 +8,5 @@ usurdb.csv
 #*#
 .#*
 *.elc
+iou_zipcodes_2024.csv
+non_iou_zipcodes_2024.csv
