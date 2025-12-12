@@ -9,9 +9,9 @@ General-purpose utility rate parser for arbitrary US ZIP codes using:
 
 import argparse
 import sys
-from pathlib import Path
 import pandas as pd
 from datetime import date
+from pathlib import Path
 
 def require_file(path):
     path = Path(path)
@@ -41,6 +41,12 @@ def load_urdb(urdb_csv):
 
     df["eiaid"] = df["eiaid"].astype("int64")
 
+    df = df.rename(columns={
+        "fixedchargefirstmeter": "fixed_charge_in_dollars",
+        "startdate": "start_date",
+        "enddate": "end_date",
+    })
+
     return df
 
 def filter_by_zip(zip_code, zipmap, urdb):
@@ -65,23 +71,26 @@ def filter_by_zip(zip_code, zipmap, urdb):
 def filter_residential_active_today(df):
     df2 = df.copy()
 
+    # Convert dates to standard format
+    df2["start_date"] = pd.to_datetime(df2["start_date"], errors="coerce")
+    df2["end_date"] = pd.to_datetime(df2["end_date"], errors="coerce")
+
     # Residential only
-    df2 = df2[df2["sector"].str.contains("res", case=False, na=False)]
+    df2 = df2.query("sector.str.contains('residential', case=False, na=False)")
 
-    # Default tariffs only
-    df2 = df2[df2["is_default"] == True]
+    # Use only Delivery rates
+    df2 = df2.query("service_type == 'Delivery'")
 
-    # Parse dates safely
-    df2["startdate"] = pd.to_datetime(df2["startdate"], errors="coerce")
-    df2["enddate"] = pd.to_datetime(df2["enddate"], errors="coerce")
+    # Use only default rates
+    df2 = df2.query("is_default == True")
 
+    # Check for plans that are active today
     today = pd.Timestamp(date.today())
 
-    # Active today filter
-    df2 = df2[
-        ((df2["startdate"].isna()) | (df2["startdate"] <= today)) &
-        ((df2["enddate"].isna()) | (df2["enddate"] >= today))
-    ]
+    df2 = df2.query(
+        "(start_date.isna() or start_date <= @today) and "
+        "(end_date.isna() or end_date >= @today)"
+    )
 
     return df2
 
@@ -95,7 +104,7 @@ def extract_flat_energy_rate(row):
 
 def add_cents_per_kwh(df):
     rates = df.apply(extract_flat_energy_rate, axis=1)
-    df["cents_per_kwh"] = (rates * 100).round(2)
+    df["var_charge_in_cents_per_kwh"] = (rates * 100).round(2)
     return df
 
 def main():
@@ -136,11 +145,11 @@ def main():
 
     try:
         urdb_path = require_file(args.urdb)
+        urdb = load_urdb(urdb_path)
+
         iou_path = require_file(args.iou)
         non_iou_path = require_file(args.non_iou)
-
         zipmap = load_zip_maps(iou_path, non_iou_path)
-        urdb = load_urdb(urdb_path)
 
         df_zip = filter_by_zip(args.zip, zipmap, urdb)
         df_res = filter_residential_active_today(df_zip)
@@ -148,18 +157,17 @@ def main():
 
         cols_out = [
             "utility_name",
-            "service_type",
-            "cents_per_kwh",
-            "fixedchargefirstmeter"
+            "start_date",
+            "end_date",
+            "var_charge_in_cents_per_kwh",
+            "fixed_charge_in_dollars"
         ]
 
-        cols_out = [c for c in cols_out if c in df_res.columns]
-
-        df_out = df_res[cols_out].dropna(subset=["cents_per_kwh"])
+        df_res = df_res[[c for c in cols_out if c in df_res.columns]]
 
         if args.out:
-            df_out.to_csv(args.out, index=False)
-            print(f"Wrote {len(df_out)} rows to {args.out}")
+            df_res.to_csv(args.out, index=False)
+            print(f"Wrote {len(df_res)} rows to {args.out}")
         else:
             # Pretty-print to terminal
             pd.set_option("display.max_rows", None)
@@ -167,8 +175,8 @@ def main():
             pd.set_option("display.width", 160)
             pd.set_option("display.colheader_justify", "left")
 
-            print("\nResidential Utility Rates (cents per kWh):\n")
-            print(df_out.to_string(index=False))
+            print("\nResidential default utility rates for ZIP code %s:\n" % (args.zip))
+            print(df_res.to_string(index=False))
 
     except Exception as e:
         print(f"ERROR: {e}")
